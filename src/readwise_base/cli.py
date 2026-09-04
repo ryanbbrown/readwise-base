@@ -40,10 +40,16 @@ def main() -> None:
     except FileExistsError as error:
         parser.exit(status=1, message=f"error: {error}\n")
     if arguments.build_backfill:
-        print(f"Built static backfill with {result.documents} documents and {result.highlights} highlights.")
+        print(
+            f"Built static backfill with {result.documents} documents and {result.highlights} highlights; "
+            f"included {result.documents_without_content} documents without content; "
+            f"omitted {result.omitted_highlights} highlights with no text."
+        )
     else:
         print(
             f"Built {result.documents} documents with {result.highlights} highlights; "
+            f"included {result.documents_without_content} documents without content; "
+            f"omitted {result.omitted_highlights} highlights with no text; "
             f"excluded {result.excluded_backfill} backfill documents."
         )
     print(f"JSONL: {result.jsonl_path}")

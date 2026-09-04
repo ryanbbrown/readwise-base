@@ -31,7 +31,7 @@ Override it when needed:
 uv run readwise-base --output /path/to/knowledge-base
 ```
 
-The normal build updates only `corpus.jsonl` and `documents/`. It includes Library documents with a document tag or highlight. It excludes Feed items, deleted documents, and documents tagged `backfill` or `.backfill`. Reader's Archive location is included.
+The normal build updates only `corpus.jsonl` and `documents/`. It includes every active top-level Library document outside Feed, including documents with no tags, notes, highlights, or available content. It excludes deleted documents and documents tagged `backfill` or `.backfill`. Reader's Archive location is included. Each record stores Reader's first-opened and last-opened times when available. Documents with no content are reported and kept as metadata-only records. Highlights with no text are reported and omitted while their parent documents remain in the corpus.
 
 ## Build the static backfill
 

@@ -33,6 +33,8 @@ def document(document_id: str, **overrides: object) -> JsonObject:
         "notes": "",
         "parent_id": None,
         "reading_progress": 1,
+        "first_opened_at": "2026-01-02T00:00:00Z",
+        "last_opened_at": "2026-01-03T00:00:00Z",
         "saved_at": "2026-01-01T00:00:00Z",
         "is_deleted": None,
     }
@@ -99,14 +101,15 @@ def read_jsonl(path: Path) -> list[JsonObject]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def test_builds_queryable_jsonl_and_title_based_markdown_for_eligible_documents(tmp_path: Path) -> None:
+def test_builds_queryable_jsonl_and_title_based_markdown_for_all_active_documents(tmp_path: Path) -> None:
     source = FakeReaderSource(
         metadata=[
             document("tagged", title="Tagged / Article", tags={"research": {}}),
             document("highlighted", title="Highlighted Article"),
             document("backfill", tags={".Backfill": {}}),
             document("feed", location="feed", tags={"research": {}}),
-            document("untouched"),
+            document("deleted", is_deleted=True),
+            document("untouched", first_opened_at="2026-02-01T00:00:00Z", last_opened_at="2026-02-02T00:00:00Z"),
         ],
         highlights=[highlight("highlight-1", "highlighted")],
         notes=[note("note-1", "highlight-1", "My comment on the highlight.")],
@@ -129,16 +132,27 @@ def test_builds_queryable_jsonl_and_title_based_markdown_for_eligible_documents(
                 "content": "Full highlighted article text.",
                 "notes": "",
             },
+            "untouched": {
+                "id": "untouched",
+                "title": "Article untouched",
+                "author": "Example Author",
+                "tags": [],
+                "category": "article",
+                "content": "Full untouched article text.",
+                "notes": "",
+            },
         },
     )
 
     result = build_corpus(source, tmp_path, workers=2)
 
-    assert result.documents == 2
+    assert result.documents == 3
+    assert result.documents_without_content == 0
     assert result.highlights == 1
+    assert result.omitted_highlights == 0
     assert result.excluded_backfill == 1
     rows = read_jsonl(result.jsonl_path)
-    assert [row["id"] for row in rows] == ["highlighted", "tagged"]
+    assert [row["id"] for row in rows] == ["highlighted", "tagged", "untouched"]
     highlighted = rows[0]
     assert highlighted["content"] == {"format": "markdown", "text": "Full highlighted article text."}
     assert highlighted["highlights"] == [
@@ -161,6 +175,13 @@ def test_builds_queryable_jsonl_and_title_based_markdown_for_eligible_documents(
     assert "## Summary\n\nA useful summary." in markdown
     assert "## Document note\n\nWhy this article matters." in markdown
     assert "## Full article\n\nFull tagged article text." in markdown
+    untouched = rows[2]
+    assert untouched["schema_version"] == 2
+    assert untouched["first_opened_at"] == "2026-02-01T00:00:00Z"
+    assert untouched["last_opened_at"] == "2026-02-02T00:00:00Z"
+    untouched_markdown = (tmp_path / untouched["markdown_path"]).read_text(encoding="utf-8")
+    assert 'first_opened_at: "2026-02-01T00:00:00Z"' in untouched_markdown
+    assert 'last_opened_at: "2026-02-02T00:00:00Z"' in untouched_markdown
 
 
 def test_archive_location_is_included_and_title_collisions_get_stable_suffixes(tmp_path: Path) -> None:
@@ -198,13 +219,35 @@ def test_rebuild_removes_only_stale_generated_markdown(tmp_path: Path) -> None:
     unrelated = tmp_path / "documents" / "My note.md"
     unrelated.write_text("Keep me.\n", encoding="utf-8")
 
-    second = FakeReaderSource(metadata=[document("old", title="Old")], highlights=[], notes=[], details={})
+    second = FakeReaderSource(metadata=[], highlights=[], notes=[], details={})
     result = build_corpus(second, tmp_path)
 
     assert result.documents == 0
     assert not (tmp_path / "documents" / "Old.md").exists()
     assert unrelated.read_text(encoding="utf-8") == "Keep me.\n"
     assert (tmp_path / "corpus.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_rebuild_reads_jsonl_with_unicode_line_separator_inside_content(tmp_path: Path) -> None:
+    source = FakeReaderSource(
+        metadata=[document("article")],
+        highlights=[],
+        notes=[],
+        details={
+            "article": {
+                "id": "article",
+                "title": "Article",
+                "content": "First paragraph.\u2028Second paragraph.",
+                "notes": "",
+            }
+        },
+    )
+
+    build_corpus(source, tmp_path)
+    result = build_corpus(source, tmp_path)
+
+    assert result.documents == 1
+    assert len((tmp_path / "corpus.jsonl").read_bytes().splitlines()) == 1
 
 
 def test_filename_sanitization_does_not_turn_punctuation_into_stray_hyphens(tmp_path: Path) -> None:
@@ -315,28 +358,23 @@ def test_feed_and_backfill_exclusions_ignore_case_and_surrounding_space(tmp_path
     assert result.excluded_backfill == 1
 
 
-def test_missing_article_content_fails_before_replacing_the_previous_snapshot(tmp_path: Path) -> None:
-    initial = FakeReaderSource(
-        metadata=[document("article", tags={"keep": {}})],
-        highlights=[],
-        notes=[],
-        details={"article": {"id": "article", "title": "Article", "content": "Complete body.", "notes": ""}},
-    )
-    build_corpus(initial, tmp_path)
-    corpus_before = (tmp_path / "corpus.jsonl").read_bytes()
-    markdown_before = (tmp_path / "documents" / "Article.md").read_bytes()
-    incomplete = FakeReaderSource(
-        metadata=[document("article", tags={"keep": {}})],
+def test_document_without_content_is_warned_and_kept_as_metadata_only(tmp_path: Path) -> None:
+    source = FakeReaderSource(
+        metadata=[document("article")],
         highlights=[],
         notes=[],
         details={"article": {"id": "article", "title": "Article", "content": "   ", "notes": ""}},
     )
 
-    with pytest.raises(ValueError, match="has no content"):
-        build_corpus(incomplete, tmp_path)
+    with pytest.warns(UserWarning, match=r"Including Reader document article \(Article\) without content"):
+        result = build_corpus(source, tmp_path)
 
-    assert (tmp_path / "corpus.jsonl").read_bytes() == corpus_before
-    assert (tmp_path / "documents" / "Article.md").read_bytes() == markdown_before
+    assert result.documents == 1
+    assert result.documents_without_content == 1
+    row = read_jsonl(result.jsonl_path)[0]
+    assert row["content"] == {"format": "markdown", "text": ""}
+    markdown = (tmp_path / row["markdown_path"]).read_text(encoding="utf-8")
+    assert "## Full article\n\n(No content available.)" in markdown
 
 
 def test_duplicate_document_ids_fail_instead_of_creating_duplicate_records(tmp_path: Path) -> None:
@@ -368,18 +406,26 @@ def test_unexpected_tag_shape_fails_instead_of_silently_excluding_a_document(tmp
         build_corpus(source, tmp_path)
 
 
-def test_missing_highlight_text_fails_instead_of_writing_an_empty_highlight(tmp_path: Path) -> None:
+def test_non_text_highlight_is_warned_and_omitted_while_its_parent_is_retained(tmp_path: Path) -> None:
     source = FakeReaderSource(
         metadata=[document("article")],
-        highlights=[highlight("highlight", "article", content=None)],
+        highlights=[highlight("image-highlight", "article", content="")],
         notes=[],
         details={"article": {"id": "article", "title": "Article", "content": "Body.", "notes": ""}},
     )
 
-    with pytest.raises(ValueError, match="Highlight highlight has no text"):
-        build_corpus(source, tmp_path)
+    with pytest.warns(UserWarning, match="Omitting highlight image-highlight because it has no text"):
+        result = build_corpus(source, tmp_path)
 
-    assert not (tmp_path / "corpus.jsonl").exists()
+    assert result.documents == 1
+    assert result.highlights == 0
+    assert result.omitted_highlights == 1
+    row = read_jsonl(result.jsonl_path)[0]
+    assert row["id"] == "article"
+    assert row["highlights"] == []
+    markdown = (tmp_path / row["markdown_path"]).read_text(encoding="utf-8")
+    assert "## Highlights" not in markdown
+    assert "## Full article\n\nBody." in markdown
 
 
 def test_non_string_article_content_fails_instead_of_serializing_a_python_repr(tmp_path: Path) -> None:

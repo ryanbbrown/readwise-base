@@ -5,15 +5,15 @@ Readwise Base builds a local corpus from selected documents in a Reader Library.
 ## Language
 
 **Reader document**:
-A top-level item stored in Reader, including its metadata, summary, note, full content, and child highlights.
+A top-level item stored in Reader, including its metadata, summary, note, available content, and child highlights.
 _Avoid_: Article, source
 
 **Highlight**:
-A selected passage attached to a Reader document, with an optional note and tags.
+A text passage attached to a Reader document, with an optional note and tags. Reader highlight rows with no text are reported and omitted.
 _Avoid_: Comment, annotation
 
 **Eligible document**:
-A Reader document that is outside Feed, is not tagged as backfill, and has at least one document tag or highlight.
+An active top-level Reader document that is outside Feed and is not tagged as backfill.
 _Avoid_: Selected article, synced item
 
 **Backfill document**:
@@ -21,7 +21,7 @@ A completed historical Reader document tagged `backfill` or `.backfill`. Backfil
 _Avoid_: Archived document, eligible document
 
 **Corpus record**:
-The complete structured representation of one Reader document belonging to a corpus.
+The structured representation of one Reader document belonging to a corpus, including Reader open times and content when available.
 _Avoid_: Row, entry
 
 **Markdown view**:
