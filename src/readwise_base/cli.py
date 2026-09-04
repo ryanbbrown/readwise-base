@@ -48,12 +48,15 @@ def main() -> None:
     else:
         print(
             f"Built {result.documents} documents with {result.highlights} highlights; "
+            f"classified {result.documents_with_interactions} with interactions and "
+            f"{result.documents_without_interactions} without interactions; "
             f"included {result.documents_without_content} documents without content; "
             f"omitted {result.omitted_highlights} highlights with no text; "
             f"excluded {result.excluded_backfill} backfill documents."
         )
     print(f"JSONL: {result.jsonl_path}")
-    print(f"Markdown: {result.markdown_dir}")
+    for markdown_dir in result.markdown_dirs:
+        print(f"Markdown: {markdown_dir}")
 
 
 if __name__ == "__main__":

@@ -148,6 +148,8 @@ def test_builds_queryable_jsonl_and_title_based_markdown_for_all_active_document
 
     assert result.documents == 3
     assert result.documents_without_content == 0
+    assert result.documents_with_interactions == 2
+    assert result.documents_without_interactions == 1
     assert result.highlights == 1
     assert result.omitted_highlights == 0
     assert result.excluded_backfill == 1
@@ -169,7 +171,7 @@ def test_builds_queryable_jsonl_and_title_based_markdown_for_all_active_document
     tagged = rows[1]
     assert tagged["summary"] == "A useful summary."
     assert tagged["document_note"] == "Why this article matters."
-    assert tagged["markdown_path"] == "documents/Tagged - Article.md"
+    assert tagged["markdown_path"] == "with-interactions/Tagged - Article.md"
     markdown = (tmp_path / tagged["markdown_path"]).read_text(encoding="utf-8")
     assert "# Tagged / Article" in markdown
     assert "## Summary\n\nA useful summary." in markdown
@@ -177,11 +179,110 @@ def test_builds_queryable_jsonl_and_title_based_markdown_for_all_active_document
     assert "## Full article\n\nFull tagged article text." in markdown
     untouched = rows[2]
     assert untouched["schema_version"] == 2
+    assert untouched["markdown_path"] == "without-interactions/Article untouched.md"
     assert untouched["first_opened_at"] == "2026-02-01T00:00:00Z"
     assert untouched["last_opened_at"] == "2026-02-02T00:00:00Z"
     untouched_markdown = (tmp_path / untouched["markdown_path"]).read_text(encoding="utf-8")
     assert 'first_opened_at: "2026-02-01T00:00:00Z"' in untouched_markdown
     assert 'last_opened_at: "2026-02-02T00:00:00Z"' in untouched_markdown
+
+
+def test_main_markdown_is_split_by_user_interactions(tmp_path: Path) -> None:
+    source = FakeReaderSource(
+        metadata=[
+            document("tagged", tags={"research": {}}),
+            document("highlighted"),
+            document("image-highlighted"),
+            document("document-note", notes="A note in metadata."),
+            document("child-note"),
+            document("detail-note"),
+            document("deleted-highlight"),
+            document("deleted-note"),
+            document("untouched"),
+        ],
+        highlights=[
+            highlight("text-highlight", "highlighted"),
+            highlight("image-highlight", "image-highlighted", content=""),
+            highlight("deleted-highlight-row", "deleted-highlight", is_deleted=True),
+        ],
+        notes=[
+            note("child-note-row", "child-note", "A child note."),
+            {**note("deleted-note-row", "deleted-note", "Deleted."), "is_deleted": True},
+        ],
+        details={
+            document_id: {
+                "id": document_id,
+                "title": f"Article {document_id}",
+                "content": "Body.",
+                "notes": "A note in details." if document_id == "detail-note" else "",
+            }
+            for document_id in (
+                "tagged",
+                "highlighted",
+                "image-highlighted",
+                "document-note",
+                "child-note",
+                "detail-note",
+                "deleted-highlight",
+                "deleted-note",
+                "untouched",
+            )
+        },
+    )
+
+    with pytest.warns(UserWarning, match="Omitting highlight image-highlight because it has no text"):
+        result = build_corpus(source, tmp_path)
+
+    rows = {row["id"]: row for row in read_jsonl(result.jsonl_path)}
+    assert {document_id: row["markdown_path"].split("/", maxsplit=1)[0] for document_id, row in rows.items()} == {
+        "child-note": "with-interactions",
+        "deleted-highlight": "without-interactions",
+        "deleted-note": "without-interactions",
+        "detail-note": "with-interactions",
+        "document-note": "with-interactions",
+        "highlighted": "with-interactions",
+        "image-highlighted": "with-interactions",
+        "tagged": "with-interactions",
+        "untouched": "without-interactions",
+    }
+    assert len(list((tmp_path / "with-interactions").glob("*.md"))) == 6
+    assert len(list((tmp_path / "without-interactions").glob("*.md"))) == 3
+    assert not (tmp_path / "documents").exists()
+
+
+def test_rebuild_moves_documents_when_interaction_status_changes(tmp_path: Path) -> None:
+    first = FakeReaderSource(
+        metadata=[
+            document("loses-tag", title="Loses tag", tags={"research": {}}),
+            document("gains-tag", title="Gains tag"),
+        ],
+        highlights=[],
+        notes=[],
+        details={
+            "loses-tag": {"id": "loses-tag", "title": "Loses tag", "content": "Body.", "notes": ""},
+            "gains-tag": {"id": "gains-tag", "title": "Gains tag", "content": "Body.", "notes": ""},
+        },
+    )
+    build_corpus(first, tmp_path)
+    second = FakeReaderSource(
+        metadata=[
+            document("loses-tag", title="Loses tag"),
+            document("gains-tag", title="Gains tag", tags={"research": {}}),
+        ],
+        highlights=[],
+        notes=[],
+        details=first.details,
+    )
+
+    build_corpus(second, tmp_path)
+
+    paths = {row["id"]: row["markdown_path"] for row in read_jsonl(tmp_path / "corpus.jsonl")}
+    assert paths == {
+        "gains-tag": "with-interactions/Gains tag.md",
+        "loses-tag": "without-interactions/Loses tag.md",
+    }
+    assert not (tmp_path / "with-interactions" / "Loses tag.md").exists()
+    assert not (tmp_path / "without-interactions" / "Gains tag.md").exists()
 
 
 def test_archive_location_is_included_and_title_collisions_get_stable_suffixes(tmp_path: Path) -> None:
@@ -203,8 +304,8 @@ def test_archive_location_is_included_and_title_collisions_get_stable_suffixes(t
 
     assert [row["location"] for row in rows] == ["archive", "archive"]
     assert [row["markdown_path"] for row in rows] == [
-        "documents/Same - Title.md",
-        "documents/Same - Title — bbb22222.md",
+        "with-interactions/Same - Title.md",
+        "with-interactions/Same - Title — bbb22222.md",
     ]
 
 
@@ -216,14 +317,14 @@ def test_rebuild_removes_only_stale_generated_markdown(tmp_path: Path) -> None:
         details={"old": {"id": "old", "title": "Old", "content": "Old body.", "notes": ""}},
     )
     build_corpus(first, tmp_path)
-    unrelated = tmp_path / "documents" / "My note.md"
+    unrelated = tmp_path / "with-interactions" / "My note.md"
     unrelated.write_text("Keep me.\n", encoding="utf-8")
 
     second = FakeReaderSource(metadata=[], highlights=[], notes=[], details={})
     result = build_corpus(second, tmp_path)
 
     assert result.documents == 0
-    assert not (tmp_path / "documents" / "Old.md").exists()
+    assert not (tmp_path / "with-interactions" / "Old.md").exists()
     assert unrelated.read_text(encoding="utf-8") == "Keep me.\n"
     assert (tmp_path / "corpus.jsonl").read_text(encoding="utf-8") == ""
 
@@ -273,17 +374,17 @@ def test_filename_sanitization_does_not_turn_punctuation_into_stray_hyphens(tmp_
     paths = {row["id"]: row["markdown_path"] for row in read_jsonl(tmp_path / "corpus.jsonl")}
 
     assert paths == {
-        "command": "documents/goal + Loss Functions - A Playbook.md",
-        "comparison": "documents/Code mode - code › calling tools.md",
-        "inner-quotes": "documents/Building a personal brand.md",
-        "literal-hyphens": "documents/-​-dangerously-skip-reading-code.md",
-        "question": "documents/Is SaaS dead.md",
-        "quoted": "documents/What's Wrong With This Idea.md",
+        "command": "with-interactions/goal + Loss Functions - A Playbook.md",
+        "comparison": "with-interactions/Code mode - code › calling tools.md",
+        "inner-quotes": "with-interactions/Building a personal brand.md",
+        "literal-hyphens": "with-interactions/-​-dangerously-skip-reading-code.md",
+        "question": "with-interactions/Is SaaS dead.md",
+        "quoted": "with-interactions/What's Wrong With This Idea.md",
     }
 
 
 def test_colliding_titles_never_share_a_path_or_overwrite_an_unrelated_file(tmp_path: Path) -> None:
-    documents_dir = tmp_path / "documents"
+    documents_dir = tmp_path / "with-interactions"
     documents_dir.mkdir()
     unrelated = documents_dir / "Same.md"
     unrelated.write_text("Keep me.\n", encoding="utf-8")
@@ -335,7 +436,7 @@ def test_reserved_device_names_are_made_portable(tmp_path: Path) -> None:
 
     build_corpus(source, tmp_path)
 
-    assert read_jsonl(tmp_path / "corpus.jsonl")[0]["markdown_path"] == "documents/_CON.txt.md"
+    assert read_jsonl(tmp_path / "corpus.jsonl")[0]["markdown_path"] == "with-interactions/_CON.txt.md"
 
 
 def test_feed_and_backfill_exclusions_ignore_case_and_surrounding_space(tmp_path: Path) -> None:
@@ -469,7 +570,7 @@ def test_builds_backfill_as_a_separate_complete_corpus(tmp_path: Path) -> None:
     assert result.documents == 1
     assert result.highlights == 1
     assert result.jsonl_path == tmp_path / "backfill.jsonl"
-    assert result.markdown_dir == tmp_path / "backfill"
+    assert result.markdown_dirs == (tmp_path / "backfill",)
     rows = read_jsonl(result.jsonl_path)
     assert [row["id"] for row in rows] == ["backfill"]
     assert rows[0]["markdown_path"] == "backfill/Building Prestige.md"
@@ -478,6 +579,8 @@ def test_builds_backfill_as_a_separate_complete_corpus(tmp_path: Path) -> None:
     assert (tmp_path / rows[0]["markdown_path"]).is_file()
     assert not (tmp_path / "corpus.jsonl").exists()
     assert not (tmp_path / "documents").exists()
+    assert not (tmp_path / "with-interactions").exists()
+    assert not (tmp_path / "without-interactions").exists()
 
 
 def test_normal_sync_never_changes_the_static_backfill_snapshot(tmp_path: Path) -> None:
@@ -499,7 +602,7 @@ def test_normal_sync_never_changes_the_static_backfill_snapshot(tmp_path: Path) 
     assert backfill_jsonl.read_bytes() == b'{"static":true}\n'
     assert backfill_markdown.read_bytes() == b"Static body.\n"
     assert (tmp_path / "corpus.jsonl").is_file()
-    assert (tmp_path / "documents" / "Main.md").is_file()
+    assert (tmp_path / "with-interactions" / "Main.md").is_file()
 
 
 def test_backfill_build_refuses_to_replace_an_existing_static_snapshot(tmp_path: Path) -> None:
@@ -510,6 +613,63 @@ def test_backfill_build_refuses_to_replace_an_existing_static_snapshot(tmp_path:
         build_backfill_corpus(ExplodingReaderSource(), tmp_path)
 
     assert backfill_jsonl.read_bytes() == b'{"static":true}\n'
+
+
+def test_successful_main_publication_removes_the_obsolete_documents_directory(tmp_path: Path) -> None:
+    documents_dir = tmp_path / "documents"
+    documents_dir.mkdir()
+    (documents_dir / "Old.md").write_text("Old layout.\n", encoding="utf-8")
+    (tmp_path / "corpus.jsonl").write_text(
+        json.dumps({"id": "old", "title": "Old", "markdown_path": "documents/Old.md"}) + "\n",
+        encoding="utf-8",
+    )
+    source = FakeReaderSource(
+        metadata=[document("new")],
+        highlights=[],
+        notes=[],
+        details={"new": {"id": "new", "title": "New", "content": "Body.", "notes": ""}},
+    )
+
+    build_corpus(source, tmp_path)
+
+    assert not documents_dir.exists()
+    assert (tmp_path / "without-interactions" / "New.md").is_file()
+
+
+def test_failed_main_publication_keeps_the_obsolete_documents_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    documents_dir = tmp_path / "documents"
+    documents_dir.mkdir()
+    old_markdown = documents_dir / "Old.md"
+    old_markdown.write_text("Old layout.\n", encoding="utf-8")
+    old_jsonl = json.dumps({"id": "old", "title": "Old", "markdown_path": "documents/Old.md"}) + "\n"
+    (tmp_path / "corpus.jsonl").write_text(old_jsonl, encoding="utf-8")
+    source = FakeReaderSource(
+        metadata=[document("new")],
+        highlights=[],
+        notes=[],
+        details={"new": {"id": "new", "title": "New", "content": "Body.", "notes": ""}},
+    )
+    original_replace = corpus_module.os.replace
+    failed = False
+
+    def fail_without_interactions_publish(source_path: str | Path, target_path: str | Path) -> None:
+        nonlocal failed
+        if Path(target_path) == tmp_path / "without-interactions" and not failed:
+            failed = True
+            raise OSError("simulated publication failure")
+        original_replace(source_path, target_path)
+
+    monkeypatch.setattr(corpus_module.os, "replace", fail_without_interactions_publish)
+
+    with pytest.raises(OSError, match="simulated publication failure"):
+        build_corpus(source, tmp_path)
+
+    assert (tmp_path / "corpus.jsonl").read_text(encoding="utf-8") == old_jsonl
+    assert old_markdown.read_text(encoding="utf-8") == "Old layout.\n"
+    assert not (tmp_path / "with-interactions").exists()
+    assert not (tmp_path / "without-interactions").exists()
 
 
 def test_failed_normal_sync_does_not_publish_any_partial_markdown(
@@ -569,7 +729,7 @@ def test_publication_failure_restores_the_previous_complete_snapshot(
     )
     build_corpus(initial, tmp_path)
     corpus_before = (tmp_path / "corpus.jsonl").read_bytes()
-    markdown_before = (tmp_path / "documents" / "Article.md").read_bytes()
+    markdown_before = (tmp_path / "with-interactions" / "Article.md").read_bytes()
     changed = FakeReaderSource(
         metadata=initial.metadata,
         highlights=[],
@@ -592,7 +752,7 @@ def test_publication_failure_restores_the_previous_complete_snapshot(
         build_corpus(changed, tmp_path)
 
     assert (tmp_path / "corpus.jsonl").read_bytes() == corpus_before
-    assert (tmp_path / "documents" / "Article.md").read_bytes() == markdown_before
+    assert (tmp_path / "with-interactions" / "Article.md").read_bytes() == markdown_before
 
 
 def test_transaction_setup_failure_cannot_be_recovered_as_an_interrupted_publication(
@@ -606,7 +766,7 @@ def test_transaction_setup_failure_cannot_be_recovered_as_an_interrupted_publica
     )
     build_corpus(original, tmp_path)
     corpus_before = (tmp_path / "corpus.jsonl").read_bytes()
-    markdown_before = (tmp_path / "documents" / "Same.md").read_bytes()
+    markdown_before = (tmp_path / "with-interactions" / "Same.md").read_bytes()
     changed = FakeReaderSource(
         metadata=[
             document("a", title="Same", tags={"keep": {}}),
@@ -632,7 +792,7 @@ def test_transaction_setup_failure_cannot_be_recovered_as_an_interrupted_publica
         build_corpus(changed, tmp_path)
 
     assert (tmp_path / "corpus.jsonl").read_bytes() == corpus_before
-    assert (tmp_path / "documents" / "Same.md").read_bytes() == markdown_before
+    assert (tmp_path / "with-interactions" / "Same.md").read_bytes() == markdown_before
     assert not list(tmp_path.glob(".corpus.jsonl.backup.*"))
     assert not list(tmp_path.glob(".corpus.jsonl.preparing.*"))
     monkeypatch.setattr(corpus_module, "_write_text_atomic", original_write)
@@ -640,8 +800,8 @@ def test_transaction_setup_failure_cannot_be_recovered_as_an_interrupted_publica
     build_corpus(changed, tmp_path)
     paths = {row["id"]: row["markdown_path"] for row in read_jsonl(tmp_path / "corpus.jsonl")}
 
-    assert paths["z"] == "documents/Same.md"
-    assert paths["a"].startswith("documents/Same — a")
+    assert paths["z"] == "with-interactions/Same.md"
+    assert paths["a"].startswith("with-interactions/Same — a")
 
 
 def test_failed_first_backfill_build_can_be_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -697,15 +857,15 @@ def test_existing_document_keeps_its_path_when_a_new_title_collides(tmp_path: Pa
     build_corpus(changed, tmp_path)
     paths = {row["id"]: row["markdown_path"] for row in read_jsonl(tmp_path / "corpus.jsonl")}
 
-    assert paths["z"] == "documents/Same.md"
-    assert paths["a"].startswith("documents/Same — a")
+    assert paths["z"] == "with-interactions/Same.md"
+    assert paths["a"].startswith("with-interactions/Same — a")
 
 
 def test_casefold_collision_does_not_hide_an_unrelated_exact_filename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path
-    documents_dir = destination / "documents"
+    documents_dir = destination / "with-interactions"
     documents_dir.mkdir()
     monkeypatch.setattr(
         Path,
@@ -714,12 +874,12 @@ def test_casefold_collision_does_not_hide_an_unrelated_exact_filename(
     )
     records: list[JsonObject] = [{"id": "new", "title": "foo"}]
     previous_records: dict[str, JsonObject] = {
-        "old": {"id": "old", "title": "Foo", "markdown_path": "documents/Foo.md"}
+        "old": {"id": "old", "title": "Foo", "markdown_path": "with-interactions/Foo.md"}
     }
 
-    corpus_module._assign_markdown_paths(records, destination, previous_records, "documents")
+    corpus_module._assign_markdown_paths(records, destination, previous_records, "with-interactions")
 
-    assert records[0]["markdown_path"] != "documents/foo.md"
+    assert records[0]["markdown_path"] != "with-interactions/foo.md"
 
 
 def test_next_sync_recovers_an_interrupted_publication_before_allocating_paths(tmp_path: Path) -> None:
@@ -732,9 +892,20 @@ def test_next_sync_recovers_an_interrupted_publication_before_allocating_paths(t
     build_corpus(original, tmp_path)
     backup = tmp_path / ".corpus.jsonl.backup.interrupted"
     backup.mkdir()
+    manifest = {
+        "had_paths": {
+            "corpus.jsonl": True,
+            "with-interactions": True,
+            "without-interactions": True,
+            "documents": False,
+        }
+    }
+    (backup / "transaction.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (backup / "state").write_text("publishing\n", encoding="utf-8")
     (tmp_path / "corpus.jsonl").replace(backup / "corpus.jsonl")
-    (tmp_path / "documents").replace(backup / "documents")
-    partial_documents = tmp_path / "documents"
+    (tmp_path / "with-interactions").replace(backup / "with-interactions")
+    (tmp_path / "without-interactions").replace(backup / "without-interactions")
+    partial_documents = tmp_path / "with-interactions"
     partial_documents.mkdir()
     (partial_documents / "Partial.md").write_text("Incomplete publication.\n", encoding="utf-8")
     changed = FakeReaderSource(
@@ -753,9 +924,9 @@ def test_next_sync_recovers_an_interrupted_publication_before_allocating_paths(t
     build_corpus(changed, tmp_path)
     paths = {row["id"]: row["markdown_path"] for row in read_jsonl(tmp_path / "corpus.jsonl")}
 
-    assert paths["z"] == "documents/Same.md"
-    assert paths["a"].startswith("documents/Same — a")
-    assert not (tmp_path / "documents" / "Partial.md").exists()
+    assert paths["z"] == "with-interactions/Same.md"
+    assert paths["a"].startswith("with-interactions/Same — a")
+    assert not (tmp_path / "with-interactions" / "Partial.md").exists()
     assert not backup.exists()
 
 
@@ -773,7 +944,7 @@ def test_next_sync_discards_abandoned_transaction_setup(tmp_path: Path) -> None:
     build_corpus(source, tmp_path)
 
     assert (tmp_path / "corpus.jsonl").is_file()
-    assert (tmp_path / "documents" / "Article.md").is_file()
+    assert (tmp_path / "with-interactions" / "Article.md").is_file()
     assert not preparing.exists()
 
 

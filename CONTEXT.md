@@ -1,6 +1,6 @@
 # Readwise corpus
 
-Readwise Base builds a local corpus from selected documents in a Reader Library.
+Readwise Base builds a local corpus from a Reader Library.
 
 ## Language
 
@@ -9,8 +9,20 @@ A top-level item stored in Reader, including its metadata, summary, note, availa
 _Avoid_: Article, source
 
 **Highlight**:
-A text passage attached to a Reader document, with an optional note and tags. Reader highlight rows with no text are reported and omitted.
-_Avoid_: Comment, annotation
+A user-created selection attached to a Reader document, with optional text, note, and tags. A highlight with no text still records a user interaction, but it cannot become a normalized text highlight.
+_Avoid_: Comment, note
+
+**Interaction**:
+A user-added tag, active highlight, comment, or note on a Reader document. Deleted highlights and notes are not interactions.
+_Avoid_: Engagement, activity
+
+**Document with interactions**:
+An eligible document that has at least one interaction.
+_Avoid_: Engaged document, annotated article
+
+**Document without interactions**:
+An eligible document that has no interactions.
+_Avoid_: Unengaged document, untouched article
 
 **Eligible document**:
 An active top-level Reader document that is outside Feed and is not tagged as backfill.
@@ -25,7 +37,7 @@ The structured representation of one Reader document belonging to a corpus, incl
 _Avoid_: Row, entry
 
 **Markdown view**:
-The generated human-readable representation of a corpus record.
+The generated human-readable representation of a corpus record, classified by whether its Reader document has interactions.
 _Avoid_: Obsidian note, source file
 
 **Main corpus**:

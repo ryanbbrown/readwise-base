@@ -39,28 +39,34 @@ class ReaderSource(Protocol):
 class BuildResult:
     documents: int
     documents_without_content: int
+    documents_with_interactions: int
+    documents_without_interactions: int
     highlights: int
     omitted_highlights: int
     excluded_backfill: int
     jsonl_path: Path
-    markdown_dir: Path
+    markdown_dirs: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
 class _CorpusLayout:
     jsonl_name: str
-    markdown_directory: str
+    markdown_directories: tuple[str, ...]
     preserve_unmanaged_files: bool
+    obsolete_directories: tuple[str, ...] = ()
 
 
+WITH_INTERACTIONS_DIRECTORY = "with-interactions"
+WITHOUT_INTERACTIONS_DIRECTORY = "without-interactions"
 MAIN_LAYOUT = _CorpusLayout(
     jsonl_name="corpus.jsonl",
-    markdown_directory="documents",
+    markdown_directories=(WITH_INTERACTIONS_DIRECTORY, WITHOUT_INTERACTIONS_DIRECTORY),
     preserve_unmanaged_files=True,
+    obsolete_directories=("documents",),
 )
 BACKFILL_LAYOUT = _CorpusLayout(
     jsonl_name="backfill.jsonl",
-    markdown_directory="backfill",
+    markdown_directories=("backfill",),
     preserve_unmanaged_files=False,
 )
 
@@ -331,30 +337,28 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _restore_backup(backup: Path, destination: Path, layout: _CorpusLayout) -> None:
-    manifest_path = backup / "transaction.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        had_jsonl = manifest.get("had_jsonl") is True
-        had_markdown = manifest.get("had_markdown") is True
-    else:
-        had_jsonl = os.path.lexists(backup / layout.jsonl_name)
-        had_markdown = os.path.lexists(backup / layout.markdown_directory)
+def _publication_names(layout: _CorpusLayout) -> tuple[str, ...]:
+    return (layout.jsonl_name, *layout.markdown_directories, *layout.obsolete_directories)
 
-    live_jsonl = destination / layout.jsonl_name
-    live_markdown = destination / layout.markdown_directory
-    backup_jsonl = backup / layout.jsonl_name
-    backup_markdown = backup / layout.markdown_directory
-    if os.path.lexists(backup_jsonl):
-        _remove_path(live_jsonl)
-        os.replace(backup_jsonl, live_jsonl)
-    elif not had_jsonl:
-        _remove_path(live_jsonl)
-    if os.path.lexists(backup_markdown):
-        _remove_path(live_markdown)
-        os.replace(backup_markdown, live_markdown)
-    elif not had_markdown:
-        _remove_path(live_markdown)
+
+def _generated_names(layout: _CorpusLayout) -> tuple[str, ...]:
+    return (layout.jsonl_name, *layout.markdown_directories)
+
+
+def _restore_backup(backup: Path, destination: Path, layout: _CorpusLayout) -> None:
+    manifest = json.loads((backup / "transaction.json").read_text(encoding="utf-8"))
+    had_paths = manifest.get("had_paths")
+    if not isinstance(had_paths, dict):
+        raise ValueError(f"invalid publication manifest at {backup}")
+
+    for name in _publication_names(layout):
+        live_path = destination / name
+        backup_path = backup / name
+        if os.path.lexists(backup_path):
+            _remove_path(live_path)
+            os.replace(backup_path, live_path)
+        elif had_paths.get(name) is not True:
+            _remove_path(live_path)
 
 
 def _recover_interrupted_publication(destination: Path, layout: _CorpusLayout) -> None:
@@ -379,16 +383,8 @@ def _publish_snapshot(staging: Path, destination: Path, layout: _CorpusLayout) -
     backup_prefix = f".{layout.jsonl_name}.backup."
     preparing = Path(tempfile.mkdtemp(dir=destination, prefix=preparing_prefix))
     backup = preparing.with_name(backup_prefix + preparing.name.removeprefix(preparing_prefix))
-    live_jsonl = destination / layout.jsonl_name
-    live_markdown = destination / layout.markdown_directory
-    staged_jsonl = staging / layout.jsonl_name
-    staged_markdown = staging / layout.markdown_directory
-    backup_jsonl = backup / layout.jsonl_name
-    backup_markdown = backup / layout.markdown_directory
-    manifest = {
-        "had_jsonl": os.path.lexists(live_jsonl),
-        "had_markdown": os.path.lexists(live_markdown),
-    }
+    publication_names = _publication_names(layout)
+    manifest = {"had_paths": {name: os.path.lexists(destination / name) for name in publication_names}}
     try:
         _write_text_atomic(preparing / "transaction.json", json.dumps(manifest, separators=(",", ":")) + "\n")
         _write_text_atomic(preparing / "state", "publishing\n")
@@ -397,12 +393,11 @@ def _publish_snapshot(staging: Path, destination: Path, layout: _CorpusLayout) -
         shutil.rmtree(preparing, ignore_errors=True)
         raise
     try:
-        if manifest["had_jsonl"]:
-            os.replace(live_jsonl, backup_jsonl)
-        if manifest["had_markdown"]:
-            os.replace(live_markdown, backup_markdown)
-        os.replace(staged_markdown, live_markdown)
-        os.replace(staged_jsonl, live_jsonl)
+        for name in publication_names:
+            if manifest["had_paths"][name]:
+                os.replace(destination / name, backup / name)
+        for name in _generated_names(layout):
+            os.replace(staging / name, destination / name)
         _write_text_atomic(backup / "state", "committed\n")
     except BaseException:
         try:
@@ -498,34 +493,54 @@ def _write_corpus_snapshot(
     records: list[JsonObject],
     destination: Path,
     layout: _CorpusLayout = MAIN_LAYOUT,
-) -> tuple[Path, Path]:
+    markdown_directory_by_id: dict[str, str] | None = None,
+) -> tuple[Path, tuple[Path, ...]]:
     destination = destination.expanduser().resolve()
     jsonl_path = destination / layout.jsonl_name
-    markdown_dir = destination / layout.markdown_directory
+    markdown_dirs = tuple(destination / name for name in layout.markdown_directories)
     destination.mkdir(parents=True, exist_ok=True)
     previous_records = _previous_records(jsonl_path)
-    _assign_markdown_paths(
-        records,
-        destination,
-        previous_records,
-        layout.markdown_directory,
-        preserve_unmanaged_files=layout.preserve_unmanaged_files,
-    )
+    if markdown_directory_by_id is None:
+        if len(layout.markdown_directories) != 1:
+            raise ValueError("a Markdown directory is required for each record")
+        markdown_directory_by_id = {str(record["id"]): layout.markdown_directories[0] for record in records}
+    for markdown_directory in layout.markdown_directories:
+        directory_records = [
+            record
+            for record in records
+            if markdown_directory_by_id.get(str(record["id"])) == markdown_directory
+        ]
+        _assign_markdown_paths(
+            directory_records,
+            destination,
+            previous_records,
+            markdown_directory,
+            preserve_unmanaged_files=layout.preserve_unmanaged_files,
+        )
+    if any("markdown_path" not in record for record in records):
+        raise ValueError("every record must belong to a Markdown directory")
+
     rendered_markdown = [(str(record["markdown_path"]), _markdown(record)) for record in records]
     jsonl = "".join(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n" for record in records)
     staging = Path(tempfile.mkdtemp(dir=destination, prefix=f".{layout.jsonl_name}.staging."))
     try:
-        staged_markdown_dir = staging / layout.markdown_directory
-        staged_markdown_dir.mkdir()
-        if layout.preserve_unmanaged_files:
-            _copy_unmanaged_entries(markdown_dir, staged_markdown_dir, previous_records, layout.markdown_directory)
+        for markdown_directory in layout.markdown_directories:
+            staged_markdown_dir = staging / markdown_directory
+            staged_markdown_dir.mkdir()
+            if layout.preserve_unmanaged_files:
+                _copy_unmanaged_entries(
+                    destination / markdown_directory,
+                    staged_markdown_dir,
+                    previous_records,
+                    markdown_directory,
+                )
         for relative_path, content in rendered_markdown:
             _write_text_atomic(staging / relative_path, content)
         _write_text_atomic(staging / layout.jsonl_name, jsonl)
         _publish_snapshot(staging, destination, layout)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return jsonl_path, markdown_dir
+    return jsonl_path, markdown_dirs
 
 
 def _build_corpus(
@@ -565,22 +580,40 @@ def _build_corpus(
 
     eligible_ids = {str(record["id"]) for record in eligible_metadata}
     metadata_by_id = {str(record["id"]): record for record in metadata_records}
+    interaction_ids = {
+        str(record["id"])
+        for record in eligible_metadata
+        if _tags(record.get("tags")) or _text(record.get("notes"))
+    }
     attached_notes: dict[str, list[JsonObject]] = defaultdict(list)
+    active_notes: list[JsonObject] = []
     for note in note_records:
-        if note.get("parent_id") and not note.get("is_deleted"):
+        if note.get("parent_id") and note.get("is_deleted") is not True:
             attached_notes[str(note["parent_id"])].append(note)
+            active_notes.append(note)
 
     highlights_by_document: dict[str, list[JsonObject]] = defaultdict(list)
+    active_highlight_parents: dict[str, str] = {}
     omitted_highlights = 0
     for highlight in highlight_records:
         parent_id = str(highlight.get("parent_id") or "")
         if parent_id not in eligible_ids or highlight.get("is_deleted") is True:
             continue
-        normalized = _normalize_highlight(highlight, metadata_by_id.get(str(highlight["id"])), attached_notes)
+        highlight_id = str(highlight["id"])
+        interaction_ids.add(parent_id)
+        active_highlight_parents[highlight_id] = parent_id
+        normalized = _normalize_highlight(highlight, metadata_by_id.get(highlight_id), attached_notes)
         if normalized is None:
             omitted_highlights += 1
             continue
         highlights_by_document[parent_id].append(normalized)
+
+    for note in active_notes:
+        parent_id = str(note["parent_id"])
+        if parent_id in eligible_ids:
+            interaction_ids.add(parent_id)
+        elif parent_id in active_highlight_parents:
+            interaction_ids.add(active_highlight_parents[parent_id])
 
     details_by_id: dict[str, JsonObject] = {}
     total = len(eligible_metadata)
@@ -608,16 +641,43 @@ def _build_corpus(
     ]
     records.sort(key=lambda record: record["id"])
 
-    jsonl_path, markdown_dir = _write_corpus_snapshot(records, destination, layout)
+    documents_with_interactions = 0
+    documents_without_interactions = 0
+    markdown_directory_by_id: dict[str, str] | None = None
+    if not backfill_only:
+        for metadata in eligible_metadata:
+            document_id = str(metadata["id"])
+            details = details_by_id[document_id]
+            if _tags(details.get("tags")) or _text(details.get("notes")):
+                interaction_ids.add(document_id)
+        documents_with_interactions = len(interaction_ids)
+        documents_without_interactions = len(records) - documents_with_interactions
+        markdown_directory_by_id = {
+            str(record["id"]): (
+                WITH_INTERACTIONS_DIRECTORY
+                if str(record["id"]) in interaction_ids
+                else WITHOUT_INTERACTIONS_DIRECTORY
+            )
+            for record in records
+        }
+
+    jsonl_path, markdown_dirs = _write_corpus_snapshot(
+        records,
+        destination,
+        layout,
+        markdown_directory_by_id,
+    )
 
     return BuildResult(
         documents=len(records),
         documents_without_content=sum(not record["content"]["text"] for record in records),
+        documents_with_interactions=documents_with_interactions,
+        documents_without_interactions=documents_without_interactions,
         highlights=sum(len(record["highlights"]) for record in records),
         omitted_highlights=omitted_highlights,
         excluded_backfill=excluded_backfill,
         jsonl_path=jsonl_path,
-        markdown_dir=markdown_dir,
+        markdown_dirs=markdown_dirs,
     )
 
 

@@ -20,7 +20,8 @@ The default destination is `~/vault/knowledge-base`:
 
 ```text
 corpus.jsonl
-documents/<Reader title>.md
+with-interactions/<Reader title>.md
+without-interactions/<Reader title>.md
 backfill.jsonl
 backfill/<Reader title>.md
 ```
@@ -31,7 +32,11 @@ Override it when needed:
 uv run readwise-base --output /path/to/knowledge-base
 ```
 
-The normal build updates only `corpus.jsonl` and `documents/`. It includes every active top-level Library document outside Feed, including documents with no tags, notes, highlights, or available content. It excludes deleted documents and documents tagged `backfill` or `.backfill`. Reader's Archive location is included. Each record stores Reader's first-opened and last-opened times when available. Documents with no content are reported and kept as metadata-only records. Highlights with no text are reported and omitted while their parent documents remain in the corpus.
+The normal build updates only `corpus.jsonl`, `with-interactions/`, and `without-interactions/`. It includes every active top-level Library document outside Feed, including documents with no tags, notes, highlights, or available content. It excludes deleted documents and documents tagged `backfill` or `.backfill`. Reader's Archive location is included. Each record stores Reader's first-opened and last-opened times when available.
+
+A document goes in `with-interactions/` when it has a user-added tag, an active highlight, or a comment or note. An active highlight counts even when it contains no text and cannot appear in the normalized highlights. All other main documents go in `without-interactions/`. Every `markdown_path` in `corpus.jsonl` points to one of these folders.
+
+Documents with no content are reported and kept as metadata-only records. Highlights with no text are reported and omitted while their parent documents remain in the corpus. A successful normal build removes the obsolete `documents/` folder as part of the publication transaction. A failed build keeps the previous layout and complete snapshot.
 
 ## Build the static backfill
 
@@ -45,7 +50,7 @@ The command writes every active, non-Feed document tagged `backfill` or `.backfi
 
 Markdown filenames use a filesystem-safe form of the Reader title. The sync removes quotation marks and question marks, changes path separators to ` - `, and preserves comparisons as `‹` and `›`. It adds a short Reader ID only when another file already uses the same name. Generated paths are unique and no unrelated file is overwritten.
 
-The sync stages the complete JSONL and Markdown snapshot before publishing either output. A fetch, validation, write, or publication failure leaves the previous complete snapshot in place. The next sync recovers an interrupted publication before doing any work.
+The sync stages the complete JSONL and both main Markdown folders before publishing the snapshot. A fetch, validation, write, or publication failure leaves the previous complete snapshot in place. The next sync recovers an interrupted publication before doing any work.
 
 ## Query the corpus
 
